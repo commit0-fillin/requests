@@ -31,7 +31,19 @@ def merge_setting(request_setting, session_setting, dict_class=OrderedDict):
     the explicit setting on that request, and the setting in the session. If a
     setting is a dictionary, they will be merged together using `dict_class`
     """
-    pass
+    if session_setting is None:
+        return request_setting
+
+    if request_setting is None:
+        return session_setting
+
+    # Dictionaries are merged, not replaced.
+    if isinstance(session_setting, Mapping) and isinstance(request_setting, Mapping):
+        merged_setting = dict_class(to_key_val_list(session_setting))
+        merged_setting.update(to_key_val_list(request_setting))
+        return merged_setting
+
+    return request_setting
 
 def merge_hooks(request_hooks, session_hooks, dict_class=OrderedDict):
     """Properly merges both requests and session hooks.
@@ -39,17 +51,34 @@ def merge_hooks(request_hooks, session_hooks, dict_class=OrderedDict):
     This is necessary because when request_hooks == {'response': []}, the
     merge breaks Session hooks entirely.
     """
-    pass
+    if session_hooks is None or session_hooks.get('response') == []:
+        return request_hooks
+
+    if request_hooks is None or request_hooks.get('response') == []:
+        return session_hooks
+
+    return merge_setting(request_hooks, session_hooks, dict_class)
 
 class SessionRedirectMixin:
 
     def get_redirect_target(self, resp):
         """Receives a Response. Returns a redirect URI or ``None``"""
-        pass
+        if resp.is_redirect:
+            location = resp.headers.get('location')
+            if location:
+                return urljoin(resp.url, location)
+        return None
 
     def should_strip_auth(self, old_url, new_url):
         """Decide whether Authorization header should be removed when redirecting"""
-        pass
+        old_parsed = urlparse(old_url)
+        new_parsed = urlparse(new_url)
+        if old_parsed.hostname != new_parsed.hostname:
+            return True
+        # Special case: allow http -> https redirect with auth
+        if old_parsed.scheme == 'http' and new_parsed.scheme == 'https':
+            return False
+        return old_parsed.port != new_parsed.port
 
     def resolve_redirects(self, resp, req, stream=False, timeout=None, verify=True, cert=None, proxies=None, yield_requests=False, **adapter_kwargs):
         """Receives a Response. Returns a generator of Responses or Requests."""
