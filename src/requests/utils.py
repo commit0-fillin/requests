@@ -39,7 +39,7 @@ if sys.platform == 'win32':
         Checks proxy settings gathered from the environment, if specified,
         or the registry.
         """
-        pass
+        return proxy_bypass_environment(host)
 
 def dict_to_sequence(d):
     """Returns an internal sequence dictionary update."""
