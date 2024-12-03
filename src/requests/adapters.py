@@ -65,11 +65,50 @@ class BaseAdapter:
         :param cert: (optional) Any user-provided SSL certificate to be trusted.
         :param proxies: (optional) The proxies dictionary to apply to the request.
         """
-        pass
+        try:
+            conn = self.get_connection(request.url, proxies)
+            
+            resp = conn.urlopen(
+                method=request.method,
+                url=request.url,
+                body=request.body,
+                headers=request.headers,
+                redirect=False,
+                assert_same_host=False,
+                preload_content=not stream,
+                decode_content=False,
+                retries=self.max_retries,
+                timeout=timeout,
+            )
+
+            response = Response()
+            response.status_code = resp.status
+            response.headers = CaseInsensitiveDict(resp.headers)
+            response.encoding = get_encoding_from_headers(response.headers)
+            response.raw = resp
+            response.reason = resp.reason
+
+            if isinstance(request.url, bytes):
+                response.url = request.url.decode('utf-8')
+            else:
+                response.url = request.url
+
+            extract_cookies_to_jar(response.cookies, request, resp)
+
+            response.request = request
+            response.connection = self
+
+            return response
+
+        except (ProtocolError, socket.error) as err:
+            raise ConnectionError(err, request=request)
 
     def close(self):
         """Cleans up adapter specific items."""
-        pass
+        for v in self.poolmanager.pools.values():
+            v.close()
+        self.poolmanager.clear()
+        self.proxy_manager.clear()
 
 class HTTPAdapter(BaseAdapter):
     """The built-in HTTP Adapter for urllib3.
@@ -134,7 +173,18 @@ class HTTPAdapter(BaseAdapter):
         :param block: Block when no free connections are available.
         :param pool_kwargs: Extra keyword arguments used to initialize the Pool Manager.
         """
-        pass
+        ssl_context = create_urllib3_context(
+            cert_reqs=self.cert_reqs,
+            ca_certs=self.ca_certs,
+            ciphers=self.ciphers
+        )
+        self.poolmanager = PoolManager(
+            num_pools=connections,
+            maxsize=maxsize,
+            block=block,
+            ssl_context=ssl_context,
+            **pool_kwargs
+        )
 
     def proxy_manager_for(self, proxy, **proxy_kwargs):
         """Return urllib3 ProxyManager for the given proxy.
@@ -148,7 +198,19 @@ class HTTPAdapter(BaseAdapter):
         :returns: ProxyManager
         :rtype: urllib3.ProxyManager
         """
-        pass
+        if proxy in self.proxy_manager:
+            return self.proxy_manager[proxy]
+
+        proxy_headers = self.proxy_headers(proxy)
+        if proxy_headers:
+            proxy_kwargs['proxy_headers'] = proxy_headers
+
+        if self.config.get('trust_env', True):
+            proxy_kwargs['proxy_ssl_context'] = _preloaded_ssl_context
+
+        proxy_manager = proxy_from_url(proxy, **proxy_kwargs)
+        self.proxy_manager[proxy] = proxy_manager
+        return proxy_manager
 
     def cert_verify(self, conn, url, verify, cert):
         """Verify a SSL certificate. This method should not be called from user
@@ -162,7 +224,22 @@ class HTTPAdapter(BaseAdapter):
             to a CA bundle to use
         :param cert: The SSL certificate to verify.
         """
-        pass
+        if isinstance(verify, str):
+            conn.cert_reqs = 'CERT_REQUIRED'
+            conn.ca_certs = verify
+        elif verify is False:
+            conn.cert_reqs = 'CERT_NONE'
+            conn.ca_certs = None
+        else:
+            conn.cert_reqs = 'CERT_REQUIRED'
+            conn.ca_certs = DEFAULT_CA_BUNDLE_PATH
+
+        if cert:
+            if isinstance(cert, str):
+                conn.cert_file = cert
+            else:
+                conn.cert_file = cert[0]
+                conn.key_file = cert[1]
 
     def build_response(self, req, resp):
         """Builds a :class:`Response <requests.Response>` object from a urllib3
@@ -174,7 +251,32 @@ class HTTPAdapter(BaseAdapter):
         :param resp: The urllib3 response object.
         :rtype: requests.Response
         """
-        pass
+        response = Response()
+
+        # Fallback to None if there's no status_code, for whatever reason.
+        response.status_code = getattr(resp, 'status', None)
+
+        # Make headers case-insensitive.
+        response.headers = CaseInsensitiveDict(getattr(resp, 'headers', {}))
+
+        # Set encoding.
+        response.encoding = get_encoding_from_headers(response.headers)
+        response.raw = resp
+        response.reason = response.raw.reason
+
+        if isinstance(req.url, bytes):
+            response.url = req.url.decode('utf-8')
+        else:
+            response.url = req.url
+
+        # Add new cookies from the server.
+        extract_cookies_to_jar(response.cookies, req, resp)
+
+        # Give the Response some context.
+        response.request = req
+        response.connection = self
+
+        return response
 
     def build_connection_pool_key_attributes(self, request, verify, cert=None):
         """Build the PoolKey attributes used by urllib3 to return a connection.
@@ -224,7 +326,35 @@ class HTTPAdapter(BaseAdapter):
             portion of the Pool Key including scheme, hostname, and port. The
             second is a dictionary of SSLContext related parameters.
         """
-        pass
+        parsed = urlparse(request.url)
+        host = parsed.hostname
+        port = parsed.port
+        if port is None:
+            port = DEFAULT_PORTS.get(parsed.scheme, 443)
+
+        host_params = {
+            'scheme': parsed.scheme,
+            'host': host,
+            'port': port,
+        }
+
+        ssl_params = {}
+        if isinstance(verify, bool):
+            ssl_params['cert_reqs'] = 'CERT_REQUIRED' if verify else 'CERT_NONE'
+        elif isinstance(verify, str):
+            if os.path.isdir(verify):
+                ssl_params['ca_certs_dir'] = verify
+            else:
+                ssl_params['ca_certs'] = verify
+
+        if cert:
+            if isinstance(cert, str):
+                ssl_params['cert_file'] = cert
+            elif isinstance(cert, tuple) and len(cert) == 2:
+                ssl_params['cert_file'] = cert[0]
+                ssl_params['key_file'] = cert[1]
+
+        return host_params, ssl_params
 
     def get_connection_with_tls_context(self, request, verify, proxies=None, cert=None):
         """Returns a urllib3 connection for the given request and TLS settings.
@@ -246,7 +376,23 @@ class HTTPAdapter(BaseAdapter):
         :rtype:
             urllib3.ConnectionPool
         """
-        pass
+        host_params, ssl_params = self.build_connection_pool_key_attributes(request, verify, cert)
+
+        proxy = select_proxy(request.url, proxies)
+
+        if proxy:
+            proxy_manager = self.proxy_manager_for(proxy)
+            conn = proxy_manager.connection_from_url(request.url)
+        else:
+            conn = self.poolmanager.connection_from_url(request.url)
+
+        conn.cert_reqs = ssl_params.get('cert_reqs', 'CERT_REQUIRED')
+        conn.ca_certs = ssl_params.get('ca_certs')
+        conn.ca_cert_dir = ssl_params.get('ca_certs_dir')
+        conn.cert_file = ssl_params.get('cert_file')
+        conn.key_file = ssl_params.get('key_file')
+
+        return conn
 
     def get_connection(self, url, proxies=None):
         """DEPRECATED: Users should move to `get_connection_with_tls_context`
@@ -260,7 +406,21 @@ class HTTPAdapter(BaseAdapter):
         :param proxies: (optional) A Requests-style dictionary of proxies used on this request.
         :rtype: urllib3.ConnectionPool
         """
-        pass
+        warnings.warn(
+            "get_connection is deprecated and will be removed in a future version. "
+            "Please use get_connection_with_tls_context instead.",
+            DeprecationWarning
+        )
+        
+        proxy = select_proxy(url, proxies)
+
+        if proxy:
+            proxy_manager = self.proxy_manager_for(proxy)
+            conn = proxy_manager.connection_from_url(url)
+        else:
+            conn = self.poolmanager.connection_from_url(url)
+
+        return conn
 
     def close(self):
         """Disposes of any internal state.
@@ -268,7 +428,9 @@ class HTTPAdapter(BaseAdapter):
         Currently, this closes the PoolManager and any active ProxyManager,
         which closes any pooled connections.
         """
-        pass
+        self.poolmanager.clear()
+        for proxy in self.proxy_manager.values():
+            proxy.clear()
 
     def request_url(self, request, proxies):
         """Obtain the url to use when making the final request.
@@ -284,7 +446,13 @@ class HTTPAdapter(BaseAdapter):
         :param proxies: A dictionary of schemes or schemes and hosts to proxy URLs.
         :rtype: str
         """
-        pass
+        proxy = select_proxy(request.url, proxies)
+        scheme = urlparse(request.url).scheme
+
+        if proxy and scheme != 'https':
+            return request.url
+        else:
+            return request.path_url
 
     def add_headers(self, request, **kwargs):
         """Add any headers needed by the connection. As of v2.0 this does
@@ -298,7 +466,7 @@ class HTTPAdapter(BaseAdapter):
         :param request: The :class:`PreparedRequest <PreparedRequest>` to add headers to.
         :param kwargs: The keyword arguments from the call to send().
         """
-        pass
+        pass  # This method is intentionally left empty for subclassing
 
     def proxy_headers(self, proxy):
         """Returns a dictionary of the headers to add to any request sent
@@ -313,7 +481,13 @@ class HTTPAdapter(BaseAdapter):
         :param proxy: The url of the proxy being used for this request.
         :rtype: dict
         """
-        pass
+        headers = {}
+        username, password = get_auth_from_url(proxy)
+
+        if username and password:
+            headers['Proxy-Authorization'] = _basic_auth_str(username, password)
+
+        return headers
 
     def send(self, request, stream=False, timeout=None, verify=True, cert=None, proxies=None):
         """Sends PreparedRequest object. Returns Response object.
