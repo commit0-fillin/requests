@@ -11,7 +11,15 @@ import sys
 
 def _resolve_char_detection():
     """Find supported character detection libraries."""
-    pass
+    try:
+        import charset_normalizer
+        return charset_normalizer
+    except ImportError:
+        try:
+            import chardet
+            return chardet
+        except ImportError:
+            return None
 chardet = _resolve_char_detection()
 _ver = sys.version_info
 is_py2 = _ver[0] == 2
