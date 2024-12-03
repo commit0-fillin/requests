@@ -57,7 +57,7 @@ class CaseInsensitiveDict(MutableMapping):
 
     def lower_items(self):
         """Like iteritems(), but with all lowercase keys."""
-        pass
+        return ((key.lower(), value) for key, value in self._store.values())
 
     def __eq__(self, other):
         if isinstance(other, Mapping):
