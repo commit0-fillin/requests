@@ -20,7 +20,11 @@ def to_native_string(string, encoding='ascii'):
     that string in the native string type, encoding and decoding where
     necessary. This assumes ASCII unless told otherwise.
     """
-    pass
+    if isinstance(string, str):
+        return string
+    if isinstance(string, bytes):
+        return string.decode(encoding)
+    return str(string)
 
 def unicode_is_ascii(u_string):
     """Determine if unicode string only contains ASCII characters.
@@ -29,4 +33,4 @@ def unicode_is_ascii(u_string):
         and not Python 2 `str`.
     :rtype: bool
     """
-    pass
+    return all(ord(char) < 128 for char in u_string)
