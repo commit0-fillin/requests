@@ -35,7 +35,7 @@ class MockRequest:
 
     def add_header(self, key, val):
         """cookiejar has no legitimate use for this method; add it back if you find one."""
-        pass
+        raise NotImplementedError("Method not implemented and not needed for cookiejar")
 
 class MockResponse:
     """Wraps a `httplib.HTTPMessage` to mimic a `urllib.addinfourl`.
@@ -51,6 +51,9 @@ class MockResponse:
         """
         self._headers = headers
 
+    def info(self):
+        return self._headers
+
 def extract_cookies_to_jar(jar, request, response):
     """Extract the cookies from the response into a CookieJar.
 
@@ -58,7 +61,12 @@ def extract_cookies_to_jar(jar, request, response):
     :param request: our own requests.Request object
     :param response: urllib3.HTTPResponse object
     """
-    pass
+    if not (hasattr(response, '_original_response') and
+            hasattr(response._original_response, 'msg')):
+        return
+    req = MockRequest(request)
+    res = MockResponse(response._original_response.msg)
+    jar.extract_cookies(res, req)
 
 def get_cookie_header(jar, request):
     """
@@ -66,14 +74,27 @@ def get_cookie_header(jar, request):
 
     :rtype: str
     """
-    pass
+    r = MockRequest(request)
+    jar.add_cookie_header(r)
+    return r.get_new_headers().get('Cookie')
 
 def remove_cookie_by_name(cookiejar, name, domain=None, path=None):
     """Unsets a cookie by name, by default over all domains and paths.
 
     Wraps CookieJar.clear(), is O(n).
     """
-    pass
+    clearables = []
+    for cookie in cookiejar:
+        if cookie.name != name:
+            continue
+        if domain is not None and domain != cookie.domain:
+            continue
+        if path is not None and path != cookie.path:
+            continue
+        clearables.append((cookie.domain, cookie.path, cookie.name))
+
+    for domain, path, name in clearables:
+        cookiejar.clear(domain, path, name)
 
 class CookieConflictError(RuntimeError):
     """There are two cookies that meet the criteria specified in the cookie jar.
@@ -105,14 +126,22 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         .. warning:: operation is O(n), not O(1).
         """
-        pass
+        try:
+            return self._find_no_duplicates(name, domain, path)
+        except KeyError:
+            return default
 
     def set(self, name, value, **kwargs):
         """Dict-like set() that also supports optional domain and path args in
         order to resolve naming collisions from using one cookie jar over
         multiple domains.
         """
-        pass
+        if isinstance(value, Morsel):
+            c = morsel_to_cookie(value)
+        else:
+            c = create_cookie(name, value, **kwargs)
+        self.set_cookie(c)
+        return c
 
     def iterkeys(self):
         """Dict-like iterkeys() that returns an iterator of names of cookies
@@ -120,7 +149,8 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         .. seealso:: itervalues() and iteritems().
         """
-        pass
+        for cookie in iter(self):
+            yield cookie.name
 
     def keys(self):
         """Dict-like keys() that returns a list of names of cookies from the
@@ -128,7 +158,7 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         .. seealso:: values() and items().
         """
-        pass
+        return list(self.iterkeys())
 
     def itervalues(self):
         """Dict-like itervalues() that returns an iterator of values of cookies
@@ -136,7 +166,8 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         .. seealso:: iterkeys() and iteritems().
         """
-        pass
+        for cookie in iter(self):
+            yield cookie.value
 
     def values(self):
         """Dict-like values() that returns a list of values of cookies from the
@@ -144,7 +175,7 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         .. seealso:: keys() and items().
         """
-        pass
+        return list(self.itervalues())
 
     def iteritems(self):
         """Dict-like iteritems() that returns an iterator of name-value tuples
@@ -152,7 +183,8 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         .. seealso:: iterkeys() and itervalues().
         """
-        pass
+        for cookie in iter(self):
+            yield cookie.name, cookie.value
 
     def items(self):
         """Dict-like items() that returns a list of name-value tuples from the
@@ -161,15 +193,23 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         .. seealso:: keys() and values().
         """
-        pass
+        return list(self.iteritems())
 
     def list_domains(self):
         """Utility method to list all the domains in the jar."""
-        pass
+        domains = []
+        for cookie in iter(self):
+            if cookie.domain not in domains:
+                domains.append(cookie.domain)
+        return domains
 
     def list_paths(self):
         """Utility method to list all the paths in the jar."""
-        pass
+        paths = []
+        for cookie in iter(self):
+            if cookie.path not in paths:
+                paths.append(cookie.path)
+        return paths
 
     def multiple_domains(self):
         """Returns True if there are multiple domains in the jar.
@@ -177,7 +217,8 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         :rtype: bool
         """
-        pass
+        domains = self.list_domains()
+        return len(domains) > 1
 
     def get_dict(self, domain=None, path=None):
         """Takes as an argument an optional domain and path and returns a plain
@@ -186,7 +227,12 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
         :rtype: dict
         """
-        pass
+        dictionary = {}
+        for cookie in iter(self):
+            if (domain is None or cookie.domain == domain) and \
+               (path is None or cookie.path == path):
+                dictionary[cookie.name] = cookie.value
+        return dictionary
 
     def __contains__(self, name):
         try:
