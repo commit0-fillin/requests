@@ -19,5 +19,6 @@ def u(s):
             "removed in a future release of Requests."
         ),
         DeprecationWarning,
+        stacklevel=2
     )
-    return s
+    return s if isinstance(s, str) else s.decode('unicode_escape')
