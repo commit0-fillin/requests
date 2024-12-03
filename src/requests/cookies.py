@@ -264,7 +264,12 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
     def update(self, other):
         """Updates this jar with cookies from another CookieJar or dict-like"""
-        pass
+        if isinstance(other, cookielib.CookieJar):
+            for cookie in other:
+                self.set_cookie(cookie)
+        else:
+            for key, value in other.items():
+                self.set(key, value)
 
     def _find(self, name, domain=None, path=None):
         """Requests uses this method internally to get cookie values.
@@ -278,7 +283,12 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
         :param path: (optional) string containing path of cookie
         :return: cookie.value
         """
-        pass
+        for cookie in iter(self):
+            if cookie.name == name:
+                if domain is None or cookie.domain == domain:
+                    if path is None or cookie.path == path:
+                        return cookie.value
+        raise KeyError(f"name={name}, domain={domain}, path={path}")
 
     def _find_no_duplicates(self, name, domain=None, path=None):
         """Both ``__get_item__`` and ``get`` call this function: it's never
@@ -292,7 +302,17 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
             that match name and optionally domain and path
         :return: cookie.value
         """
-        pass
+        toReturn = None
+        for cookie in iter(self):
+            if cookie.name == name:
+                if domain is None or cookie.domain == domain:
+                    if path is None or cookie.path == path:
+                        if toReturn is not None:
+                            raise CookieConflictError(f"There are multiple cookies with name, {name}")
+                        toReturn = cookie.value
+        if toReturn:
+            return toReturn
+        raise KeyError(f"name={name}, domain={domain}, path={path}")
 
     def __getstate__(self):
         """Unlike a normal CookieJar, this class is pickleable."""
@@ -308,11 +328,14 @@ class RequestsCookieJar(cookielib.CookieJar, MutableMapping):
 
     def copy(self):
         """Return a copy of this RequestsCookieJar."""
-        pass
+        new_cj = RequestsCookieJar()
+        for cookie in self:
+            new_cj.set_cookie(copy.deepcopy(cookie))
+        return new_cj
 
     def get_policy(self):
         """Return the CookiePolicy instance used."""
-        pass
+        return self._policy
 
 def create_cookie(name, value, **kwargs):
     """Make a cookie from underspecified parameters.
@@ -320,11 +343,62 @@ def create_cookie(name, value, **kwargs):
     By default, the pair of `name` and `value` will be set for the domain ''
     and sent on every request (this is sometimes called a "supercookie").
     """
-    pass
+    result = {
+        'version': 0,
+        'name': name,
+        'value': value,
+        'port': None,
+        'domain': '',
+        'path': '/',
+        'secure': False,
+        'expires': None,
+        'discard': True,
+        'comment': None,
+        'comment_url': None,
+        'rest': {'HttpOnly': None},
+        'rfc2109': False,
+    }
+
+    badargs = set(kwargs) - set(result)
+    if badargs:
+        raise TypeError(f"create_cookie() got unexpected keyword arguments: {list(badargs)}")
+
+    result.update(kwargs)
+    result['port_specified'] = bool(result['port'])
+    result['domain_specified'] = bool(result['domain'])
+    result['domain_initial_dot'] = result['domain'].startswith('.')
+    result['path_specified'] = bool(result['path'])
+
+    return cookielib.Cookie(**result)
 
 def morsel_to_cookie(morsel):
     """Convert a Morsel object into a Cookie containing the one k/v pair."""
-    pass
+    expires = None
+    if morsel['max-age']:
+        try:
+            expires = int(time.time() + int(morsel['max-age']))
+        except ValueError:
+            pass
+    
+    return create_cookie(
+        name=morsel.key,
+        value=morsel.value,
+        version=0,
+        port=None,
+        port_specified=False,
+        domain=morsel['domain'],
+        domain_specified=bool(morsel['domain']),
+        domain_initial_dot=morsel['domain'].startswith('.'),
+        path=morsel['path'],
+        path_specified=bool(morsel['path']),
+        secure=bool(morsel['secure']),
+        expires=expires,
+        discard=False,
+        comment=morsel['comment'],
+        comment_url=bool(morsel['comment']),
+        rest={'HttpOnly': morsel['httponly']},
+        rfc2109=False,
+    )
 
 def cookiejar_from_dict(cookie_dict, cookiejar=None, overwrite=True):
     """Returns a CookieJar from a key/value dictionary.
@@ -335,7 +409,17 @@ def cookiejar_from_dict(cookie_dict, cookiejar=None, overwrite=True):
         already in the jar with new ones.
     :rtype: CookieJar
     """
-    pass
+    if cookiejar is None:
+        cookiejar = RequestsCookieJar()
+
+    if cookie_dict is not None:
+        for name, value in cookie_dict.items():
+            if isinstance(value, Morsel):
+                cookiejar.set_cookie(morsel_to_cookie(value))
+            else:
+                cookiejar.set_cookie(create_cookie(name, value))
+
+    return cookiejar
 
 def merge_cookies(cookiejar, cookies):
     """Add cookies to cookiejar and returns a merged CookieJar.
@@ -344,4 +428,13 @@ def merge_cookies(cookiejar, cookies):
     :param cookies: Dictionary or CookieJar object to be added.
     :rtype: CookieJar
     """
-    pass
+    if not isinstance(cookiejar, cookielib.CookieJar):
+        raise ValueError('You can only merge into CookieJar')
+
+    if isinstance(cookies, dict):
+        cookiejar = cookiejar_from_dict(cookies, cookiejar, overwrite=False)
+    elif isinstance(cookies, cookielib.CookieJar):
+        for cookie in cookies:
+            cookiejar.set_cookie(cookie)
+
+    return cookiejar
